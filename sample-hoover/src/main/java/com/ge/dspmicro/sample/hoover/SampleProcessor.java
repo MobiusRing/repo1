@@ -11,7 +11,9 @@
 package com.ge.dspmicro.sample.hoover;
 
 import java.io.IOException;
+import java.net.URI;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +35,7 @@ import com.ge.dspmicro.hoover.api.processor.ProcessorException;
 import com.ge.dspmicro.hoover.api.spillway.ITransferData;
 import com.ge.dspmicro.machinegateway.types.ITransferable;
 import com.ge.dspmicro.machinegateway.types.PDataValue;
+import com.ge.dspmicro.machinegateway.types.PEnvelope;
 import com.ge.dspmicro.security.admin.api.ISecurityUtils;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
@@ -83,11 +86,6 @@ public class SampleProcessor
      */
     private static final String                      pRemoveDup      = "removeDup";
     
-    private static final String                      GOOD_QUALITY    = "GOOD";
-    
-    private static final String                      BAD_QUALITY     = "BAD";
-    
-    private List<ITransferable>						 lastValues		 = null;
     
     /** Create logger to report errors, warning massages, and info messages (runtime Statistics) */
     protected static Logger                         _logger          = LoggerFactory.getLogger(SampleProcessor.class);
@@ -114,6 +112,10 @@ public class SampleProcessor
     private Channel                                 channel;
 
     private ISecurityUtils                          securityUtils;
+    
+    private Map<URI, PEnvelope> 						previousValues 		 = new HashMap<>();
+    
+    private static final String                      GOOD_QUALITY    = "GOOD";
     
    /* private final ObjectMapper mapper = new ObjectMapper();*/
 
@@ -251,127 +253,89 @@ public class SampleProcessor
 
         // Switch cases for appropriate processing
         switch (processType)
-        {
-    		case pRemoveDup:
-    			if (!values.isEmpty())
-    			{
-    				if (lastValues == null)
-    				{
-    					List<String> newValuesToBeRemoved = new ArrayList<String>();
-    					List<String> oldValuesToBeRemoved = new ArrayList<String>();
-    					_logger.info("***lastValues is NULL***");
-    					
-    					//first time when Predix Machine starts initialize lastValues
-    					lastValues = values;
-    					
-    					//Add bad quality values to newValuesToBeRemoved and oldValuesToBeRemoved
-    					for (ITransferable newValue : values) {
-    						Object[] newArray = newValue.toString().split(",");
-    						constructBadQualityValuesList(newValuesToBeRemoved, oldValuesToBeRemoved, newArray);
-    					}
-    					//remove newValuesToBeRemoved(badquality) from values
-    					updateValuesByRemovingBadQualityValues(newValuesToBeRemoved, values);
-    					
-    					//remove oldValuesToBeRemoved(badquality) from lastValues
-    					updateValuesByRemovingBadQualityValues(oldValuesToBeRemoved, lastValues);
-    					
-    				}
-    				else
-    				{
-    					List<String> dupValues = new ArrayList<String>();
-    					List<String> diffValuesToRemoveFromOldValues = new ArrayList<String>();
-    					for (ITransferable newValue : values) {
-    						Object[] newArray = newValue.toString().split(",");
-    						for (ITransferable lastValue : lastValues) {
-    							Object[] oldArray = lastValue.toString().split(",");
-    							if (newArray[6].toString().contains(GOOD_QUALITY) && oldArray[2].toString().equals(newArray[2].toString())) {
-    								if(oldArray[4].equals(newArray[4])) {
-    									//remove these dupValues from new values
-    									dupValues.add(newArray[2].toString());
-    									break;
-									} else {
-										//remove these values form lastValues and add new(changed) values to oldvalues
-										diffValuesToRemoveFromOldValues.add(newArray[2].toString());
-										break;
-									}
-								}
-    						}
-    						constructBadQualityValuesList(dupValues, diffValuesToRemoveFromOldValues, newArray);
-    					}
-    					
-    					//update newValues(values) by removing duplicate values
-    					 updateValues(dupValues, values);
-    					
-    					//update lastValues by removing changed(new) values
-    					 updateValues(diffValuesToRemoveFromOldValues, lastValues);
-    					
-    					 //update last values by adding changed(new) values
-    					if (lastValues != null) {
-    						for (ITransferable newValue : values) {
-    							lastValues.add(newValue);
-    							_logger.info("**updated lastvalue: **"+newValue);
-    						}
-    					}
-    				}
-    			}
-    			break;
+ {
+		case pRemoveDup:
+			if (!values.isEmpty()) {
+				Iterator<ITransferable> itr = values.iterator();
+				while (itr.hasNext()) {
+					ITransferable value = itr.next();
+					PDataValue currentValue = ((PDataValue) value);
+					if (currentValue.getQuality().toString().contains(GOOD_QUALITY)) {
+						if (previousValues.containsKey(currentValue.getAddress())) {
+							if (previousValues.get(currentValue.getAddress()).toString()
+									.equals(currentValue.getValue().toString())) {
+								// remove this duplicate value from iTransferable values
+								itr.remove();
+							} else {
+								// update previous value with new value
+								previousValues.put(currentValue.getAddress(), currentValue.getValue());
+								_logger.info("currentValue: "+currentValue.toString());
+							}
 
-    		case pRemove:
-        		_logger.info("*** REMOVE Data for Subscription: " + subscriptionName); //$NON-NLS-1$
-        		values = null;
-        		break;
+						} else {
+							// add new values to previousValues map
+							previousValues.put(currentValue.getAddress(), currentValue.getValue());
+						}
+					} else {
+						// remove bad quality values from iTransferable
+						itr.remove();
+					}
+				}
+			}
+			break;
 
-        	case pPrint:
-            	_logger.info("Received Data for Subscription: " + subscriptionName); //$NON-NLS-1$
-                for (ITransferable value : values)
-                {
-                    _logger.info(" value : " + value.toString());    //$NON-NLS-1$
-                }
-                break;
-            case pTypeToUpperCase:
-                for (ITransferable value : values)
-                {
-                    if ( value instanceof PDataValue )
-                    {
-                        ((PDataValue) value).getEnvelope().setValue(
-                                ((PDataValue) value).getEnvelope().getValue().toString().toUpperCase());
-                    }
-                }
-                break;
-            case pTypeToLowerCase:
-                for (ITransferable value : values)
-                {
-                    if ( value instanceof PDataValue )
-                    {
-                        ((PDataValue) value).getEnvelope().setValue(
-                                ((PDataValue) value).getEnvelope().getValue().toString().toLowerCase());
-                    }
-                }
-                break;
-            case pTypeToXOR:
-                for (ITransferable value : values)
-                {
-                    if ( value instanceof PDataValue )
-                    {
-                        ((PDataValue) value).getEnvelope().setValue(
-                                xorWithPredix(((PDataValue) value).getEnvelope().getValue().toString()));
-                    }
-                }
-                break;
-            case pEncrypt:
-                for (ITransferable value : values)
-                {
-                    if ( value instanceof PDataValue )
-                    {
-                        ((PDataValue) value).getEnvelope().setValue(
-                                this.securityUtils.encrypt(((PDataValue) value).getEnvelope().getValue().toString()
-                                        .toCharArray()));
-                    }
-                }
-                break;
-            default:
-                break;
-        }
+		case pRemove:
+			_logger.info("*** REMOVE Data for Subscription: " + subscriptionName); //$NON-NLS-1$
+			values = null;
+			break;
+
+		case pPrint:
+			_logger.info("Received Data for Subscription: " + subscriptionName); //$NON-NLS-1$
+			for (ITransferable value : values) {
+				_logger.info(" value : " + value.toString()); //$NON-NLS-1$
+			}
+			break;
+		case pTypeToUpperCase:
+			for (ITransferable value : values) {
+				if (value instanceof PDataValue) {
+					((PDataValue) value).getEnvelope().setValue(
+							((PDataValue) value).getEnvelope().getValue()
+									.toString().toUpperCase());
+				}
+			}
+			break;
+		case pTypeToLowerCase:
+			for (ITransferable value : values) {
+				if (value instanceof PDataValue) {
+					// PEnvelope test = ((PDataValue) value).getValue();
+					((PDataValue) value).getEnvelope().setValue(
+							((PDataValue) value).getEnvelope().getValue()
+									.toString().toLowerCase());
+				}
+			}
+			break;
+		case pTypeToXOR:
+			for (ITransferable value : values) {
+				if (value instanceof PDataValue) {
+					((PDataValue) value).getEnvelope().setValue(
+							xorWithPredix(((PDataValue) value).getEnvelope()
+									.getValue().toString()));
+				}
+			}
+			break;
+		case pEncrypt:
+			for (ITransferable value : values) {
+				if (value instanceof PDataValue) {
+					((PDataValue) value).getEnvelope().setValue(
+							this.securityUtils.encrypt(((PDataValue) value)
+									.getEnvelope().getValue().toString()
+									.toCharArray()));
+				}
+			}
+			break;
+		default:
+			break;
+		}
 
     	if (values != null) 
     	{
@@ -403,63 +367,6 @@ public class SampleProcessor
         }
     }
 
-    /**
-     * remove badquality values from iTransferableList
-     * @param list
-     * @param iTransferableList
-     */
-    private void updateValuesByRemovingBadQualityValues(List<String> list, List<ITransferable> iTransferableList) {
-		if (list != null && list.size() > 0) {
-			Iterator<ITransferable> iTransferableIterator = iTransferableList.iterator();
-			while (iTransferableIterator.hasNext()) {
-				ITransferable value = iTransferableIterator.next(); 
-				Iterator<String> listValue = list.iterator();
-				while (listValue.hasNext()) {
-					String valueFromList = listValue.next();
-					if (value.toString().contains(valueFromList.toString())) {
-						iTransferableIterator.remove();
-						break;
-					}
-				}
-			}
-		}
-	}
-    
-	/**
-	 * construct badquality list 
-	 * @param newValuesToBeRemoved
-	 * @param oldValuesToBeRemoved
-	 * @param newArray
-	 */
-	private void constructBadQualityValuesList(List<String> newValuesToBeRemoved,
-			List<String> oldValuesToBeRemoved, Object[] newArray) {
-		if (newArray[6].toString().contains(BAD_QUALITY)) {
-			newValuesToBeRemoved.add(newArray[2].toString());
-			oldValuesToBeRemoved.add(newArray[2].toString());
-		}
-	}
-
-	/**
-	 * remove listvalues from iTransferableList
-	 * @param list
-	 * @param iTransferableList
-	 */
-	private void updateValues(List<String> list, List<ITransferable> iTransferableList) {
-		if (iTransferableList != null) {
-			Iterator<ITransferable> iTransferableIterator = iTransferableList.iterator();
-			while (iTransferableIterator.hasNext()) {
-				ITransferable value = iTransferableIterator.next(); 
-				Iterator<String> listValue = list.iterator();
-				while (listValue.hasNext()) {
-					String valueFromList = listValue.next();
-					if (value.toString().contains(valueFromList.toString())) {
-						iTransferableIterator.remove();
-						break;
-					}
-				}
-			}
-		}
-	}
 
     /**
      * @param value String to be XORed
